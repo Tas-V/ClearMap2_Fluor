@@ -70,10 +70,11 @@ class BatchProcessor:
     def process_folders(self):
         paths = [p for ps in self.params.get_all_paths() for p in ps]  # flatten list
         for folder in tqdm(paths, desc='Processing sample ', unit='brain'):
-            cfg_loader = ConfigLoader(folder)
-            configs = get_configs(cfg_loader.get_cfg_path('sample'), cfg_loader.get_cfg_path('processing'))
-            process_sample(configs,  align=self.params.align, cells=self.params.count_cells,
-                           vasc=self.params.run_vaculature)
+            fl.get_area_means(folder)
+            #cfg_loader = ConfigLoader(folder)
+            #configs = get_configs(cfg_loader.get_cfg_path('sample'), cfg_loader.get_cfg_path('processing'))
+            #process_sample(configs,  align=self.params.align, cells=self.params.count_cells,
+            #               vasc=self.params.run_vaculature)
         self.progress_watcher.finish()
 
 

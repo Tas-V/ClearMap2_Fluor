@@ -198,6 +198,8 @@ class Annotation(object):
         # self.dict_id_to_path = {}
         self.dict_acronym_to_id = {}
         self.dict_name_to_id = {}
+        self.dict_id_to_parent_id = {}
+
 
         self.initialize(label_file=label_file, extra_label=extra_label, annotation_file=annotation_file)
 
@@ -285,6 +287,7 @@ class Annotation(object):
         # self.dict_id_to_path = self.get_dict(from_='id', to='structure_acronym_path') #TODO to be implemented
         self.dict_acronym_to_id = self.get_dict(from_='acronym', to='id')
         self.dict_name_to_id = self.get_dict(from_='name', to='id')
+        self.dict_id_to_parent_id = self.get_dict(from_='id', to='parent_structure_id')
 
         # import atlas
         self.atlas = clearmap_io.read(self.annotation_file).astype(int)

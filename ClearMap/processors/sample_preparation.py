@@ -655,6 +655,31 @@ class PreProcessor(TabProcessor):
 
     def __align_auto_to_ref(self):
         self.prepare_watcher_for_substep(17000, self.__align_auto_to_ref_re, 'Align auto to ref')
+
+
+        ###################### NEW FUNCTIONALITY
+        auto_origin = os.path.join(self.src_directory,r'resampled_autofluorescence.tif')
+        final_directory = os.path.join(self.src_directory,r'ideal_auto')
+        if not os.path.exists(final_directory):
+            os.makedirs(final_directory)
+        transform_parameter_file_initial = os.path.join(self.src_directory, r'elastix_resampled_to_auto/TransformParameters.0.txt')
+        transform_parameter_file_final = os.path.join(self.src_directory, r'elastix_resampled_to_auto/TransformParameters.1.txt')
+        with open(transform_parameter_file_final, 'w') as f1:
+            for line in open(transform_parameter_file_initial):
+                f1.write((line.replace('mhd','tif').replace('(FinalBSplineInterpolationOrder 3)','(FinalBSplineInterpolationOrder 0)')))
+        elastix.transform(source=auto_origin,
+                        sink=None,
+                        transform_parameter_file=transform_parameter_file_final,
+                        result_directory=final_directory)
+        transformed_auto = os.path.join(final_directory, r'result.tif')
+        os.remove(auto_origin)
+        os.rename(transformed_auto,auto_origin)
+        os.remove(os.path.join(final_directory,r'transformix.log'))
+        os.rmdir(final_directory)
+        #######################
+
+
+
         align_reference_parameter = {
             # moving and reference images
             "moving_image": self.reference_file_path,

@@ -1,0 +1,591 @@
+#Fluorescence Code
+
+import numpy as np
+import csv
+import os
+import gc
+import re
+from collections import Counter
+import time
+import tifffile
+import concurrent.futures
+import sys
+import cv2
+
+from scipy import ndimage
+
+from ClearMap.processors.sample_preparation import init_preprocessor
+from ClearMap.IO import IO as clearmap_io
+from ClearMap.Alignment import Elastix as el
+from ClearMap.Alignment.Annotation import Annotation
+from ClearMap.Alignment.Resampling import resample_inverse as re_in
+
+def write_img(img_path,data):
+    data = data.transpose(2,1,0)
+    tifffile.imwrite(img_path,data)
+
+def read_img(img_path):
+    img = tifffile.imread(img_path)
+    img = img.transpose(2,1,0)
+    return img
+
+
+def resizer(stitched_shape, downsampled_path, intermediate_path, intermediate_path_1, final_path):
+    '''Takes stitched, downsampled paths to create a final array of the same size
+            Parameters:
+            stitched_shape (tuple): The shape of the stitched image
+            downsampled_path (str): The path of the downsampled image
+            intermediate_path (str): the path of the intermediate image
+            final_path (str): the path of the final image
+    
+    '''
+
+    downsampled = read_img(downsampled_path)
+    downsampled_shape = downsampled.shape
+    downsampled_dtype = downsampled.dtype
+
+    holding_array = np.zeros((stitched_shape[0], stitched_shape[1], downsampled_shape[2]))
+
+    for idx in range(downsampled_shape[2]):
+        img = downsampled[:, :, idx]
+        img_sm = cv2.resize(img, (stitched_shape[1], stitched_shape[0]), interpolation=cv2.INTER_NEAREST)
+        img_sm = img_sm.astype(downsampled_dtype)
+        holding_array[:, :, idx] = img_sm
+        print('completed ' + str(idx+1)+'/'+str(downsampled_shape[2]))
+    intermediate_resample_array = holding_array.transpose(2, 1, 0)
+    intermediate_resample_array_shape = intermediate_resample_array.shape
+    intermediate_resample = np.memmap(intermediate_path,
+                            mode='w+',
+                            shape=intermediate_resample_array_shape,
+                            dtype=downsampled_dtype)
+    intermediate_resample[:,:,:] = intermediate_resample_array[:,:,:]
+    del holding_array
+    del intermediate_resample_array
+    del intermediate_resample
+    partial_resample = np.memmap(intermediate_path,
+                                mode='r',
+                                shape = intermediate_resample_array_shape, 
+                                dtype=downsampled_dtype)
+
+    holding_array = np.memmap(intermediate_path_1,
+                            mode='w+',
+                            shape=(stitched_shape[2],stitched_shape[1],stitched_shape[0]),
+                            dtype=downsampled_dtype)
+
+    for idx in range(stitched_shape[0]):
+        img = partial_resample[:,:,idx] 
+        img_interim = cv2.resize(img,(stitched_shape[1],stitched_shape[2]), interpolation = cv2.INTER_NEAREST)
+        img_interim = img_interim.astype(downsampled_dtype)
+        holding_array[:,:,idx] = img_interim
+        print('completed ' + str(idx+1)+' out of '+ str(stitched_shape[0]))
+
+    holding_array.flush()
+
+    # Transpose the data
+    transposed_array = holding_array.transpose(2, 1, 0)
+
+    # Create a new memory-mapped array for the final data
+    final_array = np.memmap(final_path,
+                            mode='w+',
+                            shape=stitched_shape,
+                            dtype=downsampled_dtype)
+
+    # Copy the transposed data to the final memory-mapped array
+    final_array[:, :, :] = transposed_array[:, :, :]
+
+    # Flush the changes to final_array to disk
+    final_array.flush()
+
+    print('saved and complete!')
+
+def convert_img(img): #Should work with other kinds of images as well
+    '''Converts an image (typically the annotation file image) to uint16 for usability (breaks in native form) as well as create an iterative index mapping to the pixel values of the original image.
+
+            Parameters:
+            img (array): Image data (annotation file)
+    '''
+    unique_values = np.unique(img.flatten()) 
+    value_mapping = {value: idx for idx, value in enumerate(unique_values)}  
+    inverted_mapping = {idx: value for value, idx in value_mapping.items()}
+    image = np.vectorize(lambda x: value_mapping[x])(img)
+    return [image.astype(np.uint16), inverted_mapping]  
+    #16 bit img output for the transformation (transformation does not seem to work on 32 bit images)
+
+def elastix_transform_robust(folder, hemisphere, annotation, transform_parameter_file, shape):
+    current_directory = folder
+    final_directory_hemisphere = os.path.join(current_directory, r'hemisphere')
+    final_directory_annotation = os.path.join(current_directory, r'annnotation')
+    
+    if not os.path.exists(final_directory_hemisphere):
+        os.makedirs(final_directory_hemisphere)
+    if not os.path.exists(final_directory_annotation):
+        os.makedirs(final_directory_annotation)
+    
+    hemisphere_transform_location = os.path.join(final_directory_hemisphere, r'result.tif')
+    annotation_transform_location = os.path.join(final_directory_annotation, r'result.tif')
+    hemisphere_input_location = os.path.join(final_directory_hemisphere, r'hemisphere_file.tif')
+    annotation_input_location = os.path.join(final_directory_annotation, r'annotation_file.tif')
+    hemisphere_final_location_intermediate = os.path.join(final_directory_hemisphere, r'hemisphere_file_intermediate.npy')
+    annotation_final_location_intermediate = os.path.join(final_directory_annotation, r'annotation_file_intermediate.npy')
+    hemisphere_final_location_intermediate_1 = os.path.join(final_directory_hemisphere, r'hemisphere_file_intermediate_1.npy')
+    annotation_final_location_intermediate_1 = os.path.join(final_directory_annotation, r'annotation_file_intermediate_1.npy')
+    hemisphere_final_location_rescaled = os.path.join(final_directory_hemisphere, r'hemisphere_file_rescaled.npy')
+    annotation_final_location_rescaled = os.path.join(final_directory_annotation, r'annotation_file_rescaled.npy')
+
+    
+    clearmap_io.write(hemisphere_input_location, hemisphere)
+    clearmap_io.write(annotation_input_location, annotation)
+
+    # Transform hemisphere
+    hemisphere_final = el.transform(source=hemisphere_input_location, 
+                                    sink=None, 
+                                    transform_parameter_file=transform_parameter_file, 
+                                    result_directory=final_directory_hemisphere)
+    
+    resizer(stitched_shape=shape,
+            downsampled_path=hemisphere_transform_location,
+            intermediate_path=hemisphere_final_location_intermediate,
+            intermediate_path_1=hemisphere_final_location_intermediate_1,
+            final_path=hemisphere_final_location_rescaled)
+    
+    if os.path.exists(hemisphere_final_location_intermediate):
+        os.remove(hemisphere_final_location_intermediate)
+    del hemisphere_final  # Free memory
+    
+    #Issue with elastix transformation where large numbers get recast, tried setting FinalBSplineInterpolationOrder to 0
+
+    annotation_final = el.transform(source=annotation_input_location,
+                                    sink=None, 
+                                    transform_parameter_file=transform_parameter_file,
+                                    result_directory=final_directory_annotation)
+    
+    resizer(stitched_shape=shape,
+            downsampled_path=annotation_transform_location,
+            intermediate_path=annotation_final_location_intermediate,
+            intermediate_path_1=annotation_final_location_intermediate_1,
+            final_path=annotation_final_location_rescaled)
+
+    if os.path.exists(annotation_final_location_intermediate):
+        os.remove(annotation_final_location_intermediate)
+    del annotation_final  # Free memory
+
+    print('Transformations and resizing complete...')
+    return [hemisphere_final_location_rescaled, annotation_final_location_rescaled]
+
+def pixel_index_count(img, location=None):
+    unique_values, counts = np.unique(img, return_counts=True)
+    del img
+    sorted_indices = np.argsort(unique_values)
+    
+    if location is None:
+        result = [[unique_values[i], counts[i]] for i in sorted_indices]
+        return result
+    else:
+        try:
+            pixel_location = re.sub(r'npy$', 'csv', location)
+        except:
+            assert location[-4:] == '.csv', 'location is not csv or npy'
+            pixel_location = location
+        
+        with open(pixel_location, 'w', newline='') as pixel_file:
+            writer = csv.writer(pixel_file)
+            result = [[unique_values[i], counts[i]] for i in sorted_indices]
+            writer.writerows(result)
+            assert len(result) > 0, 'result list is empty!'
+        
+        return result
+
+
+def process_chunk_3d(chunk):
+    unique_values_counter = Counter()
+    flat_chunk = chunk.flatten()
+    unique_values_counter.update(flat_chunk)
+    return unique_values_counter
+
+def process_chunk_and_return_result(args):
+    z_start, z_end, img = args
+    chunk_counter = process_chunk_3d(img)
+    return z_start, z_end, chunk_counter
+
+def chunked_pixel_index_count(img, num_chunks=1, location=None):
+    unique_values_counter = Counter()
+    z_slices, _, _ = img.shape  # Only the z_slices dimension is needed
+
+    if z_slices // num_chunks != 0:
+        z_chunk_size = z_slices // num_chunks
+    else:
+        z_chunk_size = 1
+
+    chunk_args = []
+
+    for z_start in range(0, z_slices, z_chunk_size):
+        z_end = min(z_start + z_chunk_size, z_slices)
+        z_chunk = img[z_start:z_end, :, :]
+        chunk_args.append((z_start, z_end, z_chunk))
+
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        results = list(executor.map(process_chunk_and_return_result, chunk_args))
+
+    for z_start, z_end, chunk_counter in results:
+        unique_values_counter.update(chunk_counter)
+        print('working...')
+
+    unique_values = np.array(list(unique_values_counter.keys()))
+    counts = np.array(list(unique_values_counter.values()))
+    sorted_indices = np.argsort(unique_values)
+
+    result = [[unique_values[i], counts[i]] for i in sorted_indices]
+
+    if location:
+        try:
+            pixel_location = re.sub(r'npy$', 'csv', location)
+        except:
+            assert location[-4:] == '.csv', 'location is not csv or npy'
+            pixel_location = location
+        
+        with open(pixel_location, 'w', newline='') as pixel_file:
+            writer = csv.writer(pixel_file)
+            writer.writerows(result)
+            assert len(result) > 0, 'result list is empty!'
+        
+    return result
+
+
+def tuple_sum(data):
+    grouped_data = {}
+    for item in data:
+        key = item[0]
+        values = item[1:]
+        if key in grouped_data:
+            grouped_data[key].append(values)
+        else:
+            grouped_data[key] = [values]
+    
+    summed_data = []
+    for key, values_list in grouped_data.items():
+        summed_values = [sum(x) for x in zip(*values_list)]
+        summed_data.append([key] + summed_values)
+    
+    return summed_data
+
+        
+def lazy_reader(path):
+    with open(path,'r') as lazy_csv:
+        for row in lazy_csv:
+            yield row
+
+import numpy as np
+
+def process_in_chunks(arr1, arr2, chunk_size, path, method): #issue where the end of the chunk gets sent to the first position?
+    print('Chunk generation started...')
+
+    assert arr1.shape == arr2.shape, f'Input array shapes do not match: arr1 shape {arr1.shape}, arr2 shape {arr2.shape}'
+    result_array_2 = np.memmap(path, mode='w+', shape=arr1.shape, dtype=arr1.dtype)
+    counter = 0
+
+    def chunk_generator():
+        for i in range(0, arr1.shape[2], chunk_size):
+            chunk_end = min(i + chunk_size, arr1.shape[2])
+            yield i, chunk_end, arr1[:, :, i:chunk_end], arr2[:, :, i:chunk_end]
+
+    if method == 'remove_tiles':
+        for i, chunk_end, chunk_arr1, chunk_arr2 in chunk_generator():
+            chunk_result = np.where(chunk_arr1 == 0, chunk_arr1 * chunk_arr2, chunk_arr2)
+            counter += 1
+            print(counter)
+            result_array_2[:, :, i:chunk_end] = chunk_result  # Assign to the corresponding chunk range
+    elif method == 'hemisphere':
+        for i, chunk_end, chunk_arr1, chunk_arr2 in chunk_generator():
+            chunk_result = chunk_arr1 * chunk_arr2
+            counter += 1
+            print(counter)
+            result_array_2[:, :, i:chunk_end] = chunk_result  # Assign to the corresponding chunk range
+    result_array_2 = result_array_2.transpose(2,1,0)
+    result_array_2.flush()
+    print('Chunk generation finished...')
+    return result_array_2
+
+
+def process_slice_VERIFY(stitched, mask, reference_list, enum_to_ID, ID_to_anno, ID_to_parentID ): #VERIFICATION FUNCTION
+    counter = 0
+    processed_results = []
+    assert len(stitched.flatten()) == len(mask.flatten()), 'not equal, ' + str(len(stitched.flatten())) + str(len(stitched.flatten()))
+    for i,j in slice_gen(stitched=stitched, mask=mask):
+        counter +=1
+        print(counter)
+        temp_holder = pixel_index_count(j)
+        right_atlas_index = np.unique(j)
+        rmean = ndimage.mean(i, labels=j, index=right_atlas_index)
+        for right_mean, pixel_info in zip(rmean, temp_holder):
+            right_mean = int(right_mean)
+            pixels_per_slice = int(pixel_info[1])
+            ID_order_slice = int(pixel_info[0])
+            assert len(rmean) == len(temp_holder), str((rmean)) + ' ' + str((temp_holder))
+            for reference_pixel_info in reference_list:
+                ID_order_image = int(reference_pixel_info[0])
+                if ID_order_slice == ID_order_image:
+                    pixels_total = int(reference_pixel_info[1])
+                    weighted_average = right_mean*(pixels_per_slice/pixels_total)
+                    region_ID = int(enum_to_ID[ID_order_slice])
+                    parent_ID = ID_to_parentID[region_ID]
+                    region_name = str(ID_to_anno[region_ID])
+                    try:
+                        parent_name = str(ID_to_anno[int(parent_ID)])
+                    except:
+                        parent_name = 'No Parent!'
+                    row_data = [region_ID,
+                                counter,
+                                weighted_average,
+                                pixels_per_slice,
+                                pixels_total,
+                                ID_order_slice,
+                                parent_name,
+                                region_name]
+                    processed_results.append(row_data)
+                    continue
+                else:
+                    continue
+    return processed_results
+
+######################### Multiprocessor
+
+def calculate_weighted_average(right_mean, pixels_per_slice, pixels_total):
+    return right_mean * (pixels_per_slice / pixels_total)
+
+def process_single_slice(slice_data, reference_list, enum_to_ID, ID_to_anno, ID_to_parentID):
+    i, j, counter = slice_data
+    processed_slice_results = []
+
+    temp_holder = pixel_index_count(j)
+    right_atlas_index = np.unique(j)
+    rmean = ndimage.mean(i, labels=j, index=right_atlas_index)
+
+    for right_mean, pixel_info in zip(rmean, temp_holder):
+        right_mean = int(right_mean)
+        pixels_per_slice = int(pixel_info[1])
+        ID_order_slice = int(pixel_info[0])
+
+        assert len(rmean) == len(temp_holder), f"{rmean} {temp_holder}"
+
+        for reference_pixel_info in reference_list:
+            ID_order_image = int(reference_pixel_info[0])
+            if ID_order_slice == ID_order_image:
+                pixels_total = int(reference_pixel_info[1])
+                weighted_average = calculate_weighted_average(right_mean, 
+                                                              pixels_per_slice, 
+                                                              pixels_total)
+                try:
+                    region_ID = int(enum_to_ID[ID_order_slice])
+                except: 
+                    print(enum_to_ID)
+                    print(ID_order_slice)
+                parent_ID = ID_to_parentID[region_ID]
+                region_name = str(ID_to_anno[region_ID])
+                try:
+                    parent_name = str(ID_to_anno[int(parent_ID)])
+                except:
+                    parent_name = 'No Parent!'
+                row_data = [region_ID,
+                            counter,
+                            weighted_average,
+                            pixels_per_slice,
+                            pixels_total,
+                            ID_order_slice,
+                            parent_name,
+                            region_name]
+                processed_slice_results.append(row_data)
+                break
+
+    return processed_slice_results
+
+def process_slice(stitched, mask, reference_list, enum_to_ID, ID_to_anno, ID_to_parentID, num_processes=48):
+    slice_data_list = list(slice_gen(stitched=stitched, mask=mask))
+    slice_data_with_counter = [(i, j, counter + 1) for counter, (i, j) in enumerate(slice_data_list)]
+
+    processed_results = []
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as executor:
+        futures = [executor.submit(process_single_slice, data, reference_list, enum_to_ID, ID_to_anno, ID_to_parentID) for data in slice_data_with_counter]
+        for future in concurrent.futures.as_completed(futures):
+            processed_results.extend(future.result())
+
+    return processed_results
+
+
+#######################
+
+
+
+def slice_gen(stitched, mask):
+    for i, j in zip(stitched, mask):
+        yield i, j
+        
+
+def get_area_means(folder): 
+    # Need to replace the resampled_autofluorescence file with the tiff version of elastix_resampled_to_auto/result.0.mhd (open w/ fiji and export as tiff). After that, rerun the alignment step and also check make sure 'Skip resampling' is enabled! 
+    total_start = time.time()
+    preproc = init_preprocessor(folder)
+    gc.enable()
+    transform_parameter_file_initial = os.path.join(folder, r'elastix_auto_to_reference/TransformParameters.1.txt')
+    transform_parameter_file_final = os.path.join(folder, r'elastix_auto_to_reference/TransformParameters.2.txt')
+    with open(transform_parameter_file_final, 'w') as f1:
+        for line in open(transform_parameter_file_initial):
+            f1.write((line.replace('mhd','tif').replace('(FinalBSplineInterpolationOrder 3)','(FinalBSplineInterpolationOrder 0)')))
+    #get annotation_file in proper format
+    annotation_file = clearmap_io.read(preproc.annotation_file_path)
+    annotationobject = Annotation()
+    annotationobject.initialize(label_file = True)
+    ID_to_anno = annotationobject.dict_id_to_name
+    ID_to_parentID = annotationobject.dict_id_to_parent_id
+    annotation_file_total = convert_img(annotation_file)
+    annotation_file = annotation_file_total[0]
+    enum_to_ID = annotation_file_total[1]
+    stitched_location = preproc.workspace.filename('stitched',extension='.npy')
+    #stitched_location = r'/media/taz/Extreme_SSD/Taz/230420_Stable/stitched1.npy'
+    stitched = np.load(stitched_location, mmap_mode='r')
+    #stitched = np.memmap(stitched_location)
+    stitched_shape = stitched.shape
+    #stitched_shape = (stitched.shape[0]//2, stitched.shape[1]//2, stitched.shape[2])
+    stitched_dtype = stitched.dtype
+    print('Stitched Shape: ' + str(stitched_shape))
+    #stitched_location = r'/media/taz/Extreme_SSD/Taz/230420_Stable/resized_mmapped.npy' #DEL
+    del stitched
+    csv_path = os.path.join(folder, r'Fluorescence_Info.csv')
+    file = open(csv_path, 'w', newline='')
+    writer = csv.writer(file)
+    writer.writerow(['Annotation ID', 
+                     'Slice Number', 
+                     'Mean Fluorescense', 
+                     'Ano Pixel Count Slice', 
+                     'Ano Pixel Count Total', 
+                     'Annotation Index', 
+                     'Parent Name', 
+                     'Annotation Name'])
+    #get hemisphere file
+    hemispheres_file = clearmap_io.read(preproc.hemispheres_file_path)
+    hemispheres_file = convert_img(hemispheres_file)[0]
+    hemispheres_file = 1-hemispheres_file
+    #clearmap_io.write(folder + r'/ano.tif',annotation_file)
+    #clearmap_io.write(folder + r'/hemi.tif',hemispheres_file)
+    
+    
+
+    started_transforms = time.time()
+    transformed_files = elastix_transform_robust(folder = folder, 
+                                                 hemisphere = hemispheres_file, 
+                                                 annotation = annotation_file, 
+                                                 transform_parameter_file = transform_parameter_file_final, 
+                                                 shape = stitched_shape)
+    ended_transforms = time.time()
+
+
+    stitched = np.load(stitched_location)
+    annotation_temp = np.memmap(transformed_files[1], 
+                                shape = stitched_shape, 
+                                dtype = stitched_dtype, 
+                                mode ='r')
+    #transformed files 
+    started_chunking_annotations = time.time()
+    annotation_mask_path = os.path.join(folder,r'annotation_mask.npy')
+    #issue in process in chunks, chunk mismatch
+
+    annotation_temp_1 = process_in_chunks(arr1=stitched, 
+                                            arr2=annotation_temp, 
+                                            path=annotation_mask_path, 
+                                            method='remove_tiles', 
+                                            chunk_size=50)
+    tifffile.imsave(r'/media/taz/Joe_SSD/Test_08_18_2023/Sample_5_c0/annotation_temp_1.tif',annotation_temp_1)
+    ended_chunking_annotations = time.time()
+    del annotation_temp
+    del stitched
+    del annotation_temp_1
+    gc.collect()
+
+    hemispheres_temp = np.memmap(transformed_files[0], 
+                                 mode='r',
+                                 shape = stitched_shape,
+                                 dtype = stitched_dtype)
+    
+    gc.collect()
+
+    annotation_mask_r = np.memmap(annotation_mask_path,
+                                  mode='r',
+                                  shape = stitched_shape, 
+                                  dtype = stitched_dtype)
+    
+    started_chunking_hemispheres = time.time()
+
+    annotation_mask_final_path = os.path.join(folder, r'annotation_mask_final.npy')
+    hemispheres_temp_1 = process_in_chunks(arr1=annotation_mask_r,
+                                           arr2=hemispheres_temp,
+                                           path=annotation_mask_final_path, 
+                                           method='hemisphere',
+                                           chunk_size=50)
+    tifffile.imsave(r'/media/taz/Joe_SSD/Test_08_18_2023/Sample_5_c0/hemishpheres_temp_1.tif',hemispheres_temp_1)
+    del hemispheres_temp
+    del hemispheres_temp_1
+    gc.collect()
+
+    ended_chunking_hemispheres = time.time()
+    #stitched = np.load(stitched_location, mmap_mode='r')
+    stitched = np.memmap(stitched_location,mode = 'r',shape=stitched_shape,dtype=stitched_dtype)
+    mask = np.memmap(annotation_mask_final_path,mode = 'r',shape=stitched_shape,dtype=stitched_dtype)
+
+    # Read annotation data and calculate pixel counts
+    started_pixel_index = time.time()
+    print('Pixel counting started...')
+    annotation_pixel_counts = chunked_pixel_index_count(img = mask, 
+                                                        location = annotation_mask_final_path,
+                                                        num_chunks=48)
+    print('Pixel counting finished...')
+    ended_pixel_index = time.time()
+    del mask
+    mask = np.memmap(annotation_mask_final_path,
+                     mode = 'r', 
+                     shape = stitched_shape, 
+                     dtype = stitched_dtype)
+    
+
+    started_output = time.time()
+
+
+    processed_data = process_slice(stitched = stitched,
+                                   mask = mask,
+                                   reference_list = annotation_pixel_counts,
+                                   enum_to_ID=enum_to_ID,
+                                   ID_to_anno=ID_to_anno,
+                                   ID_to_parentID=ID_to_parentID)
+    writer.writerows(processed_data)
+    file.close()
+    # tifffile.imsave('/media/taz/Extreme_SSD/Taz/230420_Stable/hemisphere/STITCHED.tif',stitched)
+    # tifffile.imsave('/media/taz/Extreme_SSD/Taz/230420_Stable/hemisphere/MASK1.tif',mask)
+
+    finished_output = time.time()
+    del stitched
+    del mask
+    gc.collect()
+
+
+
+    total_finish = time.time()
+    print('Time to transform: ' + str((ended_transforms-started_transforms)/60)+ ' minutes')
+    print('Time to chunk annotations: ' + str((ended_chunking_annotations-started_chunking_annotations)/60)+ ' minutes')
+    print('Time to chunk hemispheres: ' + str((ended_chunking_hemispheres-started_chunking_hemispheres)/60)+ ' minutes') 
+    print('Time to pixel index: ' + str((ended_pixel_index-started_pixel_index)/60)+ ' minutes')
+    print('Time to start processing data: ' + str((finished_output-started_output)/60)+ ' minutes') 
+    print('Total elasped time of entire script is: ' + str((total_finish-total_start)/60)+ ' minutes')
+    
+    # #for the left side of the brain
+    # upscaled_hemispheres = 1-upscaled_hemispheres
+    # clearmap_io.write(r'/home/taz/Documents/Tester/upscaledhemispheres_invert.tif', upscaled_hemispheres)
+    # left_brain = resampled*upscaled_hemispheres
+    # left_atlas = upscaled_annotation*upscaled_hemispheres
+    # left_brain_labels = np.sort(np.unique(left_atlas))[1:]
+    # left_mean = ndimage.mean(left_brain, labels = left_atlas, index = left_brain_labels)
+    # for j,k in zip(left_brain_labels, left_mean):
+    #     for i in brain_IDs:
+    #         if int(brain_IDs[i]) == int(j):
+    #             try: 
+    #                 writer.writerow(['Left Side', str(annotations[int(parentIDs[int(i)])]), str(annotations[int(i)]) ,str(i), str(j), str(k)])
+    #             except:
+    #                 writer.writerow(['Left Side', 'NaN', str(annotations[int(i)]) ,str(i), str(j), str(k)])
