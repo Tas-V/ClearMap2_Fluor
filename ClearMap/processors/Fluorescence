@@ -77,7 +77,7 @@ def resizer(stitched_shape, downsampled_path, intermediate_path, intermediate_pa
         img_interim = cv2.resize(img,(stitched_shape[1],stitched_shape[2]), interpolation = cv2.INTER_NEAREST)
         img_interim = img_interim.astype(downsampled_dtype)
         holding_array[:,:,idx] = img_interim
-        print('completed ' + str(idx+1)+' out of '+ str(stitched_shape[0]))
+        print('Completed Resizing  ' + str(idx+1)+' Planes Out Of '+ str(stitched_shape[0]) + ' Total Planes')
 
     holding_array.flush()
 
@@ -169,7 +169,6 @@ def elastix_transform_robust(folder, hemisphere, annotation, transform_parameter
         os.remove(annotation_final_location_intermediate)
     del annotation_final  # Free memory
 
-    print('Transformations and resizing complete...')
     return [hemisphere_final_location_rescaled, annotation_final_location_rescaled]
 
 def pixel_index_count(img, location=None):
@@ -216,6 +215,11 @@ def chunked_pixel_index_count(img, num_chunks=1, location=None):
     else:
         z_chunk_size = 1
 
+    if z_slices%num_chunks>0:
+        count = z_chunk_size + 1
+    else:
+        count = z_chunk_size  
+
     chunk_args = []
 
     for z_start in range(0, z_slices, z_chunk_size):
@@ -225,10 +229,11 @@ def chunked_pixel_index_count(img, num_chunks=1, location=None):
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
         results = list(executor.map(process_chunk_and_return_result, chunk_args))
-
+    temp_counter = 0
     for z_start, z_end, chunk_counter in results:
+        temp_counter+=1
         unique_values_counter.update(chunk_counter)
-        print('working...')
+        print('Completed ' + str(count)+'/'+str(temp_counter) + ' Chunks')
 
     unique_values = np.array(list(unique_values_counter.keys()))
     counts = np.array(list(unique_values_counter.values()))
@@ -277,11 +282,13 @@ def lazy_reader(path):
 import numpy as np
 
 def process_in_chunks(arr1, arr2, chunk_size, path, method): #issue where the end of the chunk gets sent to the first position?
-    print('Chunk generation started...')
-
     assert arr1.shape == arr2.shape, f'Input array shapes do not match: arr1 shape {arr1.shape}, arr2 shape {arr2.shape}'
     result_array_2 = np.memmap(path, mode='w+', shape=arr1.shape, dtype=arr1.dtype)
     counter = 0
+
+    tot_chunks = arr1.shape[2]//chunk_size
+    if arr1.shape[2]%chunk_size>0:
+        tot_chunks+=1
 
     def chunk_generator():
         for i in range(0, arr1.shape[2], chunk_size):
@@ -292,17 +299,16 @@ def process_in_chunks(arr1, arr2, chunk_size, path, method): #issue where the en
         for i, chunk_end, chunk_arr1, chunk_arr2 in chunk_generator():
             chunk_result = np.where(chunk_arr1 == 0, chunk_arr1 * chunk_arr2, chunk_arr2)
             counter += 1
-            print(counter)
+            print('Completed ' + str(counter) + '/' + str(tot_chunks) + ' Chunks')
             result_array_2[:, :, i:chunk_end] = chunk_result  # Assign to the corresponding chunk range
     elif method == 'hemisphere':
         for i, chunk_end, chunk_arr1, chunk_arr2 in chunk_generator():
             chunk_result = chunk_arr1 * chunk_arr2
             counter += 1
-            print(counter)
+            print('Completed ' + str(counter) + '/' + str(tot_chunks) + ' Chunks')
             result_array_2[:, :, i:chunk_end] = chunk_result  # Assign to the corresponding chunk range
     result_array_2 = result_array_2.transpose(2,1,0)
     result_array_2.flush()
-    print('Chunk generation finished...')
     return result_array_2
 
 
@@ -422,7 +428,7 @@ def slice_gen(stitched, mask):
         
 
 def get_area_means(folder): 
-    # Need to replace the resampled_autofluorescence file with the tiff version of elastix_resampled_to_auto/result.0.mhd (open w/ fiji and export as tiff). After that, rerun the alignment step and also check make sure 'Skip resampling' is enabled! 
+    print('Preprocessing Started')
     total_start = time.time()
     preproc = init_preprocessor(folder)
     gc.enable()
@@ -441,14 +447,9 @@ def get_area_means(folder):
     annotation_file = annotation_file_total[0]
     enum_to_ID = annotation_file_total[1]
     stitched_location = preproc.workspace.filename('stitched',extension='.npy')
-    #stitched_location = r'/media/taz/Extreme_SSD/Taz/230420_Stable/stitched1.npy'
     stitched = np.load(stitched_location, mmap_mode='r')
-    #stitched = np.memmap(stitched_location)
     stitched_shape = stitched.shape
-    #stitched_shape = (stitched.shape[0]//2, stitched.shape[1]//2, stitched.shape[2])
     stitched_dtype = stitched.dtype
-    print('Stitched Shape: ' + str(stitched_shape))
-    #stitched_location = r'/media/taz/Extreme_SSD/Taz/230420_Stable/resized_mmapped.npy' #DEL
     del stitched
     csv_path = os.path.join(folder, r'Fluorescence_Info.csv')
     file = open(csv_path, 'w', newline='')
@@ -461,46 +462,48 @@ def get_area_means(folder):
                      'Annotation Index', 
                      'Parent Name', 
                      'Annotation Name'])
-    #get hemisphere file
+
     hemispheres_file = clearmap_io.read(preproc.hemispheres_file_path)
     hemispheres_file = convert_img(hemispheres_file)[0]
     hemispheres_file = 1-hemispheres_file
-    #clearmap_io.write(folder + r'/ano.tif',annotation_file)
-    #clearmap_io.write(folder + r'/hemi.tif',hemispheres_file)
-    
+
+    print('Preprocessing Finished')
     
 
     started_transforms = time.time()
+    print('Transformations Started')
     transformed_files = elastix_transform_robust(folder = folder, 
                                                  hemisphere = hemispheres_file, 
                                                  annotation = annotation_file, 
                                                  transform_parameter_file = transform_parameter_file_final, 
                                                  shape = stitched_shape)
     ended_transforms = time.time()
+    print('Transformations Finished')
 
-
+    print('Tile Masking Started')
     stitched = np.load(stitched_location)
     annotation_temp = np.memmap(transformed_files[1], 
                                 shape = stitched_shape, 
                                 dtype = stitched_dtype, 
                                 mode ='r')
-    #transformed files 
+                                
     started_chunking_annotations = time.time()
     annotation_mask_path = os.path.join(folder,r'annotation_mask.npy')
-    #issue in process in chunks, chunk mismatch
 
     annotation_temp_1 = process_in_chunks(arr1=stitched, 
                                             arr2=annotation_temp, 
                                             path=annotation_mask_path, 
                                             method='remove_tiles', 
                                             chunk_size=50)
-    tifffile.imsave(r'/media/taz/Joe_SSD/Test_08_18_2023/Sample_5_c0/annotation_temp_1.tif',annotation_temp_1)
     ended_chunking_annotations = time.time()
+    print('Tile Masking Finished')
+
     del annotation_temp
     del stitched
     del annotation_temp_1
     gc.collect()
 
+    print('Hemisphere Masking Started')
     hemispheres_temp = np.memmap(transformed_files[0], 
                                  mode='r',
                                  shape = stitched_shape,
@@ -521,23 +524,24 @@ def get_area_means(folder):
                                            path=annotation_mask_final_path, 
                                            method='hemisphere',
                                            chunk_size=50)
-    tifffile.imsave(r'/media/taz/Joe_SSD/Test_08_18_2023/Sample_5_c0/hemishpheres_temp_1.tif',hemispheres_temp_1)
+
     del hemispheres_temp
     del hemispheres_temp_1
+    print('Hemisphere Masking Finished')
+
     gc.collect()
 
+    print('Pixel Counting Started...')
     ended_chunking_hemispheres = time.time()
-    #stitched = np.load(stitched_location, mmap_mode='r')
     stitched = np.memmap(stitched_location,mode = 'r',shape=stitched_shape,dtype=stitched_dtype)
     mask = np.memmap(annotation_mask_final_path,mode = 'r',shape=stitched_shape,dtype=stitched_dtype)
 
     # Read annotation data and calculate pixel counts
     started_pixel_index = time.time()
-    print('Pixel counting started...')
     annotation_pixel_counts = chunked_pixel_index_count(img = mask, 
                                                         location = annotation_mask_final_path,
                                                         num_chunks=48)
-    print('Pixel counting finished...')
+    print('Pixel Counting Finished...')
     ended_pixel_index = time.time()
     del mask
     mask = np.memmap(annotation_mask_final_path,
@@ -548,18 +552,18 @@ def get_area_means(folder):
 
     started_output = time.time()
 
-
+    print('Started Processing Data and Writing to CSV')
     processed_data = process_slice(stitched = stitched,
                                    mask = mask,
                                    reference_list = annotation_pixel_counts,
                                    enum_to_ID=enum_to_ID,
                                    ID_to_anno=ID_to_anno,
                                    ID_to_parentID=ID_to_parentID)
+
     writer.writerows(processed_data)
     file.close()
-    # tifffile.imsave('/media/taz/Extreme_SSD/Taz/230420_Stable/hemisphere/STITCHED.tif',stitched)
-    # tifffile.imsave('/media/taz/Extreme_SSD/Taz/230420_Stable/hemisphere/MASK1.tif',mask)
-
+    print('Finished Processing')
+    
     finished_output = time.time()
     del stitched
     del mask

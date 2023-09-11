@@ -69,12 +69,15 @@ class BatchProcessor:
 
     def process_folders(self):
         paths = [p for ps in self.params.get_all_paths() for p in ps]  # flatten list
+        iterator = 1
         for folder in tqdm(paths, desc='Processing sample ', unit='brain'):
             fl.get_area_means(folder)
+            print('Finished Folder ' + str(iterator) + '/' + len(paths)))
             #cfg_loader = ConfigLoader(folder)
             #configs = get_configs(cfg_loader.get_cfg_path('sample'), cfg_loader.get_cfg_path('processing'))
             #process_sample(configs,  align=self.params.align, cells=self.params.count_cells,
             #               vasc=self.params.run_vaculature)
+            iterator+=1
         self.progress_watcher.finish()
 
 
