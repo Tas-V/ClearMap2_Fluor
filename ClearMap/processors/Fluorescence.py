@@ -11,7 +11,6 @@ import tifffile
 import concurrent.futures
 import sys
 import cv2
-
 from scipy import ndimage
 
 from ClearMap.processors.sample_preparation import init_preprocessor
@@ -21,29 +20,43 @@ from ClearMap.Alignment.Annotation import Annotation
 from ClearMap.Alignment.Resampling import resample_inverse as re_in
 
 def write_img(img_path,data):
+    ''' Transposes image due to tifffile's axes convention being different than numpy's and writes to selected location
+            Parameters:
+            img_path (str): Path of the final image (filename must end with .tif)
+            data (array): Numpy array (or memmap with defined shape) containing data
+    '''
     data = data.transpose(2,1,0)
     tifffile.imwrite(img_path,data)
 
 def read_img(img_path):
+    ''' Transposes image due to tifffile's axes convention being different than numpy's and reads from selected location
+            Parameters:
+            img_path (str): The path of the final image (filename must end with .tif)
+
+            Returns:
+            img (array): Corrected array
+    '''
     img = tifffile.imread(img_path)
     img = img.transpose(2,1,0)
     return img
 
 
 def resizer(stitched_shape, downsampled_path, intermediate_path, intermediate_path_1, final_path):
-    '''Takes stitched, downsampled paths to create a final array of the same size
+    '''Resizes an image corresponding to the downsampled path to the same shape as the stitched shape
             Parameters:
-            stitched_shape (tuple): The shape of the stitched image
-            downsampled_path (str): The path of the downsampled image
-            intermediate_path (str): the path of the intermediate image
-            final_path (str): the path of the final image
-    
+            stitched_shape (tuple): Shape of the stitched image
+            downsampled_path (str): Path of the downsampled image
+            intermediate_path (str): Path of the first intermediate image
+            intermediate_path_1 (str): Path of the second intermediate image
+            final_path (str): Path of the final image
     '''
 
+    # Obtain the shape and dtype for the downsampled image
     downsampled = read_img(downsampled_path)
     downsampled_shape = downsampled.shape
     downsampled_dtype = downsampled.dtype
 
+    # Create a temp array with a 'partial' shape (resampling occurs two dimensionally)
     holding_array = np.zeros((stitched_shape[0], stitched_shape[1], downsampled_shape[2]))
 
     for idx in range(downsampled_shape[2]):
@@ -51,67 +64,91 @@ def resizer(stitched_shape, downsampled_path, intermediate_path, intermediate_pa
         img_sm = cv2.resize(img, (stitched_shape[1], stitched_shape[0]), interpolation=cv2.INTER_NEAREST)
         img_sm = img_sm.astype(downsampled_dtype)
         holding_array[:, :, idx] = img_sm
-        print('completed ' + str(idx+1)+'/'+str(downsampled_shape[2]))
+        print(f'Resized {str(idx+1)} Planes(s) Out Of {str(downsampled_shape[2])} Total Planes')
+
+    # Transpose to allow for resizing in different dimension
     intermediate_resample_array = holding_array.transpose(2, 1, 0)
     intermediate_resample_array_shape = intermediate_resample_array.shape
     intermediate_resample = np.memmap(intermediate_path,
                             mode='w+',
                             shape=intermediate_resample_array_shape,
                             dtype=downsampled_dtype)
+    
+    # Copy intermediate data to intermediate memmap on disk
     intermediate_resample[:,:,:] = intermediate_resample_array[:,:,:]
+    intermediate_resample.flush()
+
+    # Delete arrays to save memory
     del holding_array
     del intermediate_resample_array
     del intermediate_resample
+
+    # Open new memmaps 
     partial_resample = np.memmap(intermediate_path,
                                 mode='r',
                                 shape = intermediate_resample_array_shape, 
                                 dtype=downsampled_dtype)
-
     holding_array = np.memmap(intermediate_path_1,
                             mode='w+',
                             shape=(stitched_shape[2],stitched_shape[1],stitched_shape[0]),
                             dtype=downsampled_dtype)
 
+    # Resize along final axis
     for idx in range(stitched_shape[0]):
         img = partial_resample[:,:,idx] 
         img_interim = cv2.resize(img,(stitched_shape[1],stitched_shape[2]), interpolation = cv2.INTER_NEAREST)
         img_interim = img_interim.astype(downsampled_dtype)
         holding_array[:,:,idx] = img_interim
-        print('Completed Resizing  ' + str(idx+1)+' Planes Out Of '+ str(stitched_shape[0]) + ' Total Planes')
-
+        print(f'Resized {str(idx+1)} Plane(s) Out Of {str(stitched_shape[0])} Total Planes')
     holding_array.flush()
 
     # Transpose the data
     transposed_array = holding_array.transpose(2, 1, 0)
 
-    # Create a new memory-mapped array for the final data
+    # Create a new memmap for the final data
     final_array = np.memmap(final_path,
                             mode='w+',
                             shape=stitched_shape,
                             dtype=downsampled_dtype)
 
-    # Copy the transposed data to the final memory-mapped array
+    # Copy the transposed data to the final memmap
     final_array[:, :, :] = transposed_array[:, :, :]
 
     # Flush the changes to final_array to disk
     final_array.flush()
-
-    print('saved and complete!')
+    os.remove(intermediate_path)
+    os.remove(intermediate_path_1)
 
 def convert_img(img): #Should work with other kinds of images as well
     '''Converts an image (typically the annotation file image) to uint16 for usability (breaks in native form) as well as create an iterative index mapping to the pixel values of the original image.
-
             Parameters:
             img (array): Image data (annotation file)
+
+            Returns:
+            image_16_bit (array): The final image converted to uint16
+            inverted_mapping (dict): Contains mapped dictionary of index and corresponding pixel values from original images
     '''
     unique_values = np.unique(img.flatten()) 
     value_mapping = {value: idx for idx, value in enumerate(unique_values)}  
     inverted_mapping = {idx: value for value, idx in value_mapping.items()}
     image = np.vectorize(lambda x: value_mapping[x])(img)
-    return [image.astype(np.uint16), inverted_mapping]  
+    image_16_bit = image.astype(np.uint16)
+    return [image_16_bit, inverted_mapping]  
     #16 bit img output for the transformation (transformation does not seem to work on 32 bit images)
 
 def elastix_transform_robust(folder, hemisphere, annotation, transform_parameter_file, shape):
+    '''Transforms hemisphere and annotation tif files
+            Parameters:
+            folder (str): Current directory
+            hemisphere (array): Array containing hemisphere data
+            annotation (array): Array containing annotation data
+            transform_parameter_file (str): Path to the transform parameter file 
+            shape (tuple): Shape of stitched file, hemisphere and annotation files will be cast to the same shape
+
+            Returns:
+            hemisphere_final_location_rescaled (str): Path to the rescaled hemisphere file
+            annotation_final_location_rescaled (str): Path to the rescaled annotation file
+    '''
     current_directory = folder
     final_directory_hemisphere = os.path.join(current_directory, r'hemisphere')
     final_directory_annotation = os.path.join(current_directory, r'annnotation')
@@ -152,7 +189,7 @@ def elastix_transform_robust(folder, hemisphere, annotation, transform_parameter
         os.remove(hemisphere_final_location_intermediate)
     del hemisphere_final  # Free memory
     
-    #Issue with elastix transformation where large numbers get recast, tried setting FinalBSplineInterpolationOrder to 0
+    # Issue with elastix transformation where large numbers get recast, setting FinalBSplineInterpolationOrder to 0 seems to fix it
 
     annotation_final = el.transform(source=annotation_input_location,
                                     sink=None, 
@@ -172,6 +209,14 @@ def elastix_transform_robust(folder, hemisphere, annotation, transform_parameter
     return [hemisphere_final_location_rescaled, annotation_final_location_rescaled]
 
 def pixel_index_count(img, location=None):
+    '''Returns pixel counts of given image array
+            Parameters:
+            img (array): Array containing image data
+            location (str): If path given (.csv) stores pixel counts in csv
+
+            Returns:
+            result (list): list of lists containing data for unique values and counts
+    '''
     unique_values, counts = np.unique(img, return_counts=True)
     del img
     sorted_indices = np.argsort(unique_values)
@@ -196,6 +241,13 @@ def pixel_index_count(img, location=None):
 
 
 def process_chunk_3d(chunk):
+    '''Helper function that processes given 3D chunk
+            Parameters:
+            chunk (array): Piece of image array
+
+            Returns:
+            unique_values_counter (Counter): instance of the Counter class to keep an updated list of elements
+    '''
     unique_values_counter = Counter()
     flat_chunk = chunk.flatten()
     unique_values_counter.update(flat_chunk)

@@ -72,7 +72,7 @@ class BatchProcessor:
         iterator = 1
         for folder in tqdm(paths, desc='Processing sample ', unit='brain'):
             fl.get_area_means(folder)
-            print('Finished Folder ' + str(iterator) + '/' + len(paths)))
+            print(f'Finished {str(iterator)} Out Of {str(len(paths))}')
             #cfg_loader = ConfigLoader(folder)
             #configs = get_configs(cfg_loader.get_cfg_path('sample'), cfg_loader.get_cfg_path('processing'))
             #process_sample(configs,  align=self.params.align, cells=self.params.count_cells,
