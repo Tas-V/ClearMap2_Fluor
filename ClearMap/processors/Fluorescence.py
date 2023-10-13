@@ -1,5 +1,11 @@
 #Fluorescence Code
 
+#Requirements: 
+#Must have at least twice as much RAM as stitched image size to use code; will be updated in the future to support smaller images. 
+#Have ClearMap folder setup on an SSD with proper linkage. The code does many read/write processes and as such can crash if using and HDD instead. 
+#Enough file storage space required, 3-4x the amount of space as the stitched file due to the number of intermediate files created. 
+
+
 import numpy as np
 import csv
 import os
@@ -204,6 +210,8 @@ def elastix_transform_robust(folder, hemisphere, annotation, transform_parameter
 
     if os.path.exists(annotation_final_location_intermediate):
         os.remove(annotation_final_location_intermediate)
+    if os.path.exists(annotation_final_location_intermediate_1):
+        os.remove(annotation_final_location_intermediate_1)
     del annotation_final  # Free memory
 
     return [hemisphere_final_location_rescaled, annotation_final_location_rescaled]
@@ -246,7 +254,7 @@ def process_chunk_3d(chunk):
             chunk (array): Piece of image array
 
             Returns:
-            unique_values_counter (Counter): instance of the Counter class to keep an updated list of elements
+            unique_values_counter (Counter): Instance of the Counter class to keep an updated list of elements
     '''
     unique_values_counter = Counter()
     flat_chunk = chunk.flatten()
@@ -254,11 +262,29 @@ def process_chunk_3d(chunk):
     return unique_values_counter
 
 def process_chunk_and_return_result(args):
+    '''Helper function for multiprocessing
+            Parameters:
+            args (list): Contains z_start, z_end, and img parameters 
+
+            Returns:
+            z_start (int): Start index
+            z_end (int): End index
+            chunk_counter (counter): An instance of the counter class to count each chunk
+    '''
     z_start, z_end, img = args
     chunk_counter = process_chunk_3d(img)
     return z_start, z_end, chunk_counter
 
 def chunked_pixel_index_count(img, num_chunks=1, location=None):
+    '''Main function to count pixel values in the final annotation mask. Used to verify results and for the weighted average calculation.
+            Parameters:
+            img (npy array): Numpy array in memory, specifically the final annotation mask
+            num_chunks (int): Number of chunks to use for processing at one time 
+            location (path): Optional path to create csv of counts 
+
+            Returns:
+            result (list of lists): Contains pairs of lists with unique values and corresponding counts
+    '''
     unique_values_counter = Counter()
     z_slices, _, _ = img.shape  # Only the z_slices dimension is needed
 
@@ -307,33 +333,18 @@ def chunked_pixel_index_count(img, num_chunks=1, location=None):
         
     return result
 
-
-def tuple_sum(data):
-    grouped_data = {}
-    for item in data:
-        key = item[0]
-        values = item[1:]
-        if key in grouped_data:
-            grouped_data[key].append(values)
-        else:
-            grouped_data[key] = [values]
-    
-    summed_data = []
-    for key, values_list in grouped_data.items():
-        summed_values = [sum(x) for x in zip(*values_list)]
-        summed_data.append([key] + summed_values)
-    
-    return summed_data
-
-        
-def lazy_reader(path):
-    with open(path,'r') as lazy_csv:
-        for row in lazy_csv:
-            yield row
-
-import numpy as np
-
 def process_in_chunks(arr1, arr2, chunk_size, path, method): #issue where the end of the chunk gets sent to the first position?
+    '''Processes input arrays based on the defined methods. Can specify chunk sizes. Creates a new np memmap to save data.
+            Parameters:
+            arr1 (np array): In the context of the remove_tiles method, requires the stitched image. In context of hemisphere method, does not matter
+            arr2 (np array): In the context of the remove_tiles method, requires the atlas. In context of the hemisphere method, does not matter
+            chunk_size (int): The size of the chunk to use for processing
+            path (path): Path of the intermediate file (same size as stitched)
+            method (string): The method to use, either 'remove_tiles' or 'hemisphere'
+
+            Returns:
+            result_array_2 (array): Resulting array after process completed, deleted after calling function to save memory
+    '''
     assert arr1.shape == arr2.shape, f'Input array shapes do not match: arr1 shape {arr1.shape}, arr2 shape {arr2.shape}'
     result_array_2 = np.memmap(path, mode='w+', shape=arr1.shape, dtype=arr1.dtype)
     counter = 0
@@ -363,54 +374,31 @@ def process_in_chunks(arr1, arr2, chunk_size, path, method): #issue where the en
     result_array_2.flush()
     return result_array_2
 
-
-def process_slice_VERIFY(stitched, mask, reference_list, enum_to_ID, ID_to_anno, ID_to_parentID ): #VERIFICATION FUNCTION
-    counter = 0
-    processed_results = []
-    assert len(stitched.flatten()) == len(mask.flatten()), 'not equal, ' + str(len(stitched.flatten())) + str(len(stitched.flatten()))
-    for i,j in slice_gen(stitched=stitched, mask=mask):
-        counter +=1
-        print(counter)
-        temp_holder = pixel_index_count(j)
-        right_atlas_index = np.unique(j)
-        rmean = ndimage.mean(i, labels=j, index=right_atlas_index)
-        for right_mean, pixel_info in zip(rmean, temp_holder):
-            right_mean = int(right_mean)
-            pixels_per_slice = int(pixel_info[1])
-            ID_order_slice = int(pixel_info[0])
-            assert len(rmean) == len(temp_holder), str((rmean)) + ' ' + str((temp_holder))
-            for reference_pixel_info in reference_list:
-                ID_order_image = int(reference_pixel_info[0])
-                if ID_order_slice == ID_order_image:
-                    pixels_total = int(reference_pixel_info[1])
-                    weighted_average = right_mean*(pixels_per_slice/pixels_total)
-                    region_ID = int(enum_to_ID[ID_order_slice])
-                    parent_ID = ID_to_parentID[region_ID]
-                    region_name = str(ID_to_anno[region_ID])
-                    try:
-                        parent_name = str(ID_to_anno[int(parent_ID)])
-                    except:
-                        parent_name = 'No Parent!'
-                    row_data = [region_ID,
-                                counter,
-                                weighted_average,
-                                pixels_per_slice,
-                                pixels_total,
-                                ID_order_slice,
-                                parent_name,
-                                region_name]
-                    processed_results.append(row_data)
-                    continue
-                else:
-                    continue
-    return processed_results
-
-######################### Multiprocessor
-
 def calculate_weighted_average(right_mean, pixels_per_slice, pixels_total):
-    return right_mean * (pixels_per_slice / pixels_total)
+    '''Simple helper function to calculate the weighted average
+            Parameters:
+            right_mean (float): average pixel intensity value of stitched
+            pixels_per_slice (int): number of pixels for specific mask value
+            pixels_total (int): Number of total pixels for specific mask value
+
+            Returns:
+            weighted_avg (float): The weighted average of the pixel intensity for the given mask value in the given slice (summed up in the end to obtain actual mean intensity for given mask value in whole brain)
+    '''
+    weighted_avg = right_mean * (pixels_per_slice / pixels_total)
+    return weighted_avg
 
 def process_single_slice(slice_data, reference_list, enum_to_ID, ID_to_anno, ID_to_parentID):
+    '''Helper function to perform processing of a single slice.
+            Parameters:
+            slice_data (np array): Numpy array of data for given slice
+            reference_list (list): Reference list containing atlas mask pixel count
+            enum_to_ID (dict): Mapping of atlas IDs to 16 bit img index
+            ID_to_anno (dict): Mapping of annotation name to atlas ID
+            ID_to_parentID (dict): Mapping of parent ID to atlas ID
+
+            Returns:
+            processed_slice_results (list of lists): Contains the final list of all processed slices
+    '''
     i, j, counter = slice_data
     processed_slice_results = []
 
@@ -457,6 +445,19 @@ def process_single_slice(slice_data, reference_list, enum_to_ID, ID_to_anno, ID_
     return processed_slice_results
 
 def process_slice(stitched, mask, reference_list, enum_to_ID, ID_to_anno, ID_to_parentID, num_processes=48):
+    '''Main function to process stitched image in slices to obtain final measurement results. Multiprocesseor capabilities with num_processes editable.
+            Parameters:
+            stitched (np array): The stitched image
+            mask (np array): The final mask 
+            reference_list (list): Reference list containing atlas mask pixel count
+            enum_to_ID (dict): Mapping of atlas IDs to 16 bit img index
+            ID_to_anno (dict): Mapping of annotation name to atlas ID
+            ID_to_parentID (dict): Mapping of parent ID to atlas ID
+            num_processes (int): Number of processors to run 
+
+            Returns:
+            processed_results (list): List containing the finalized results
+    '''
     slice_data_list = list(slice_gen(stitched=stitched, mask=mask))
     slice_data_with_counter = [(i, j, counter + 1) for counter, (i, j) in enumerate(slice_data_list)]
 
@@ -469,17 +470,60 @@ def process_slice(stitched, mask, reference_list, enum_to_ID, ID_to_anno, ID_to_
 
     return processed_results
 
-
-#######################
-
-
-
 def slice_gen(stitched, mask):
+    '''Generator for slices
+            Parameters:
+            stitched (np array): The stitched image
+            mask (np array): The final mask     
+
+            Yields:
+            i (npy array): Slice data for stitched
+            j (npy array): Slice data for mask
+    '''
     for i, j in zip(stitched, mask):
         yield i, j
-        
+
+def summer(folder):
+    '''Creates CSV for simplified data
+            Parameters: 
+            folder (path): The input folder(s) used in ClearMap batchmode
+    '''
+    input_csv_path = os.path.join(folder,r'Fluorescence_Info.csv')
+    export_csv_path = os.path.join(folder,r'Fluorescence_Info_Final.csv')
+    with open (input_csv_path,'r') as csvfile:
+        reading_object = csv.reader(csvfile,delimiter=',')
+        next(reading_object)
+        checker = []
+        final_list = []
+        for row in reading_object:
+            if row[7] not in checker:
+                checker.append(row[7])
+                final_list.append([row[6],row[7],float(row[2]),int(row[3])])     #Parent, Annotation, Mean Fluor, Pixel Count
+            else:
+                for row_1 in final_list:
+                    if row_1[1] == row[7]:
+                        row_1[2] += float(row[2])
+                        row_1[3] += int(row[3])
+    print(f'The final list is {final_list}')
+    with open (export_csv_path,'w') as csvwriter:
+        writing_object = csv.writer(csvwriter,delimiter=',')
+        writing_object.writerow(['Parent',
+                                'Annotation',
+                                'Mean Fluorescence',
+                                'Pixel Count'])
+        writing_object.writerows(final_list)
+
+
+
+
+
+
 
 def get_area_means(folder): 
+    '''Main script
+            Parameters: 
+            folder (path): The input folder(s) used in ClearMap batchmode
+    '''
     print('Preprocessing Started')
     total_start = time.time()
     preproc = init_preprocessor(folder)
@@ -595,12 +639,8 @@ def get_area_means(folder):
                                                         num_chunks=48)
     print('Pixel Counting Finished...')
     ended_pixel_index = time.time()
-    del mask
-    mask = np.memmap(annotation_mask_final_path,
-                     mode = 'r', 
-                     shape = stitched_shape, 
-                     dtype = stitched_dtype)
-    
+
+    tiff_path=os.path.join(folder,r'annotation_mask_final.tif')
 
     started_output = time.time()
 
@@ -614,34 +654,25 @@ def get_area_means(folder):
 
     writer.writerows(processed_data)
     file.close()
-    print('Finished Processing')
+
+    summer(folder=folder)
     
-    finished_output = time.time()
+    print('Finished Processing!')
     del stitched
+    write_img(img_path=tiff_path,data=mask)
     del mask
     gc.collect()
-
-
-
+    finished_output = time.time()
+    
+    os.remove(transformed_files[0])
+    os.remove(transformed_files[1])
+    os.remove(annotation_mask_path)
+    os.remove(annotation_mask_final_path)
     total_finish = time.time()
+    
     print('Time to transform: ' + str((ended_transforms-started_transforms)/60)+ ' minutes')
     print('Time to chunk annotations: ' + str((ended_chunking_annotations-started_chunking_annotations)/60)+ ' minutes')
     print('Time to chunk hemispheres: ' + str((ended_chunking_hemispheres-started_chunking_hemispheres)/60)+ ' minutes') 
     print('Time to pixel index: ' + str((ended_pixel_index-started_pixel_index)/60)+ ' minutes')
     print('Time to start processing data: ' + str((finished_output-started_output)/60)+ ' minutes') 
     print('Total elasped time of entire script is: ' + str((total_finish-total_start)/60)+ ' minutes')
-    
-    # #for the left side of the brain
-    # upscaled_hemispheres = 1-upscaled_hemispheres
-    # clearmap_io.write(r'/home/taz/Documents/Tester/upscaledhemispheres_invert.tif', upscaled_hemispheres)
-    # left_brain = resampled*upscaled_hemispheres
-    # left_atlas = upscaled_annotation*upscaled_hemispheres
-    # left_brain_labels = np.sort(np.unique(left_atlas))[1:]
-    # left_mean = ndimage.mean(left_brain, labels = left_atlas, index = left_brain_labels)
-    # for j,k in zip(left_brain_labels, left_mean):
-    #     for i in brain_IDs:
-    #         if int(brain_IDs[i]) == int(j):
-    #             try: 
-    #                 writer.writerow(['Left Side', str(annotations[int(parentIDs[int(i)])]), str(annotations[int(i)]) ,str(i), str(j), str(k)])
-    #             except:
-    #                 writer.writerow(['Left Side', 'NaN', str(annotations[int(i)]) ,str(i), str(j), str(k)])
