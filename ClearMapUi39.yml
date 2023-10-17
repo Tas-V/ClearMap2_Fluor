@@ -28,7 +28,7 @@ dependencies:
   - pyqtgraph=0.12  # Problem with pyqtgraph import of QWidgets with 0.13
   - opencv
   - cython<3
-  - numpy
+  - numpy=1.24.4
   - scipy
   - pandas<2  # Groupby syntax changes
   - pyarrow
