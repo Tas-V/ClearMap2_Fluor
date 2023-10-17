@@ -82,6 +82,8 @@ default_reference_file, default_distance_to_surface_file = decompress_atlases(at
 
 default_label_file = os.path.join(settings.atlas_folder, 'ABA_annotation.json')
 
+alternative_label_file = os.path.join(settings.atlas_folder,'ABA_annotation_last.json')
+
 """Default list of labels and region names in the annotated image.
 
 Note
@@ -191,6 +193,7 @@ class Annotation(object):
         self.extra_label = None
         self.annotation_file = None
         self.label_file = None
+        self.parentIDs = None
 
         self.dict_id_to_acronym = {}
         self.dict_id_to_name = {}
@@ -200,7 +203,6 @@ class Annotation(object):
         self.dict_name_to_id = {}
         self.dict_id_to_parent_id = {}
 
-
         self.initialize(label_file=label_file, extra_label=extra_label, annotation_file=annotation_file)
 
     def _initialize_dataframe(self):
@@ -209,6 +211,7 @@ class Annotation(object):
             "name": self.names,
             "acronym": self.acronyms,
             "colors_hex": self.colors_hex,
+            "parent_structure_id": self.parentIDs
             #"colors_rgb": self.colors_rgb,
         })
         df["colors_rgb"] = df["colors_hex"].map(lambda x: col.hex_to_rgb(x))
@@ -230,6 +233,8 @@ class Annotation(object):
         # read json file
         if label_file is None:
             label_file = default_label_file
+        if label_file is True:
+            label_file = alternative_label_path
         if annotation_file is None:
             annotation_file = default_annotation_file
         if extra_label is None:
@@ -276,7 +281,9 @@ class Annotation(object):
         self.labels = self.get_list('atlas_id')
         self.names = self.get_list('name')
         self.acronyms = self.get_list('acronym')
+        self.parentIDs = self.get_list('parent_structure_id')
 
+     
         # build dataframe
         self.df = self._initialize_dataframe()
 
