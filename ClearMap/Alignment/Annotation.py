@@ -234,7 +234,7 @@ class Annotation(object):
         if label_file is None:
             label_file = default_label_file
         if label_file is True:
-            label_file = alternative_label_path
+            label_file = alternative_label_file
         if annotation_file is None:
             annotation_file = default_annotation_file
         if extra_label is None:
