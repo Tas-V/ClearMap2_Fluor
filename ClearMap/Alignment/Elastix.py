@@ -373,8 +373,8 @@ def set_metric_parameter_file(parameter_file, metric):
   shutil.move(tmpfn, parameter_file)
 
 
-def result_data_file(result_directory):
-  """Returns the mhd result file in a result directory.
+def result_data_file(result_directory): 
+  """Returns the mhd/tif result file in a result directory.
   
   Arguments
   ---------
@@ -384,14 +384,19 @@ def result_data_file(result_directory):
   Returns
   -------
   result_file : str
-    The mhd file in the result directory.
+    The mhd/tif file in the result directory.
   """
   files = os.listdir(result_directory)
-  files = [x for x in files if re.match('.*.mhd', x)]
+
+  for x in files:
+    if re.match('.mhd',x):
+      files = [x]
+    elif re.match('.tif',x):
+      files = [x]
   files.sort()
 
   if not files:
-    raise RuntimeError('Cannot find a valid result data file in ' + result_directory)
+    raise RuntimeError('Cannot find a valid result data file in the directory' + result_directory)
 
   return os.path.join(result_directory, files[0])
 
