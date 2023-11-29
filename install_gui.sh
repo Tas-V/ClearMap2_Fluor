@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+
+
+
+
 PROG_NAME=$0
 
 BASEDIR=$(dirname "$0")
@@ -124,7 +128,12 @@ case "$answer" in
     *)
         green "Using libmamba";
         conda install -y -n base conda-libmamba-solver;
-        solver_string="--experimental-solver=libmamba";
+        # Check if the experimental-solver option is supported
+        if conda info | grep "experimental-solver" > /dev/null; then
+            solver_string="--experimental-solver=libmamba";
+        else
+            yellow "Warning: Experimental solver not supported on this Conda version. Using default solver.";
+        fi
         ;;
 esac
 
