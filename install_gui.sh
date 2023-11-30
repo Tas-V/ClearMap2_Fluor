@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 
-
-
-
-
 PROG_NAME=$0
 
 BASEDIR=$(dirname "$0")
@@ -64,8 +60,8 @@ function green(){
 
 function yellow(){
     echo -e "\x1B[33m $1 \x1B[0m"
-    if [ ! -z "${2}" ]; then
-    echo -e "\x1B[33m $($2) \x1B[0m"
+    if [ -n "${2}" ]; then
+      echo -e "\x1B[33m $($2) \x1B[0m"
     fi
 }
 
@@ -80,15 +76,17 @@ function green_n(){  # FIXME: parametrise above instead
 
 green "Using env file $ENV_FILE_PATH"
 
-green "Checking dependencies"
-if [[ $(dpkg-query --show --showformat='${db:Status-Status}\n' 'build-essential') == "installed" ]]; then
-    green "Compilation tools available"
-else
-    red "Package \"build-essential\" was not found. It is required for compilation.
-         Please install it using
-         sudo apt install build-essential
-         and try the installation process again"
-         exit 1
+if  [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    green "Checking dependencies"
+    if [[ $(dpkg-query --show --showformat='${db:Status-Status}\n' 'build-essential') == "installed" ]]; then
+        green "Compilation tools available"
+    else
+        red "Package \"build-essential\" was not found. It is required for compilation.
+             Please install it using
+             sudo apt install build-essential
+             and try the installation process again"
+             exit 1
+    fi
 fi
 
 conda -V || { echo "Conda missing exiting"; exit 1; }
@@ -128,17 +126,12 @@ case "$answer" in
     *)
         green "Using libmamba";
         conda install -y -n base conda-libmamba-solver;
-        # Check if the experimental-solver option is supported
-        if conda info | grep "experimental-solver" > /dev/null; then
-            solver_string="--experimental-solver=libmamba";
-        else
-            yellow "Warning: Experimental solver not supported on this Conda version. Using default solver.";
-        fi
+        solver_string="--solver=libmamba";
         ;;
 esac
 
 
-if  [[ "$OSTYPE" == "linux-gnu"* ]]; then
+if  [[ "$OSTYPE" == "linux-gnu"* ]]; then  # FIXME: or "$OSTYPE" == "msys"
     green "ClearMap uses neural networks to perform vasculature analysis.
       The implementation of these networks relies on proprietary technology
       from nVIDIA called CUDA. To perform vasculature analysis, you will
@@ -165,13 +158,17 @@ fi
 # Amend environment file (notably for compatibility with installed CUDA version)
 echo "Updating CUDA dependencies for ClearMap"
 echo "  Creating temporary environment"
-conda create -n clearmap_tmp_env -c conda-forge python pyyaml "$solver_string" || exit 1
+if  [[ "$OSTYPE" == "msys"* ]]; then
+    conda create -y -n clearmap_tmp_env -c conda-forge python pyyaml "$solver_string"
+else
+    conda create -n clearmap_tmp_env -c conda-forge python pyyaml "$solver_string" || exit 1
+fi
 conda activate clearmap_tmp_env || exit 1
 green "Done"
 
 echo "  Getting env name"
-ENV_NAME=$(python -c "from ClearMap.Utils.install_utils import EnvFileManager; \
-env_mgr = EnvFileManager('$BASEDIR/$ENV_FILE_PATH', None); \
+ENV_NAME=$(python -c "import os; from ClearMap.Utils.install_utils import EnvFileManager; \
+env_mgr = EnvFileManager(os.path.normpath(os.path.join(os.getcwd(), '$ENV_FILE_PATH')), None); \
 env_name=env_mgr.get_env_name(); print(env_name)")
 green "Env name: $ENV_NAME"
 
@@ -186,6 +183,10 @@ fi
 if [ ! -d "$tmp_dir" ]; then
     yellow "Folder missing $tmp_dir, it will be created"
     mkdir -p $tmp_dir || exit 1
+fi
+
+if  [[ "$OSTYPE" == "msys"* ]]; then
+    export tmp_dir="C:/Users/$USERNAME/AppData/Local/Temp"
 fi
 green "Using temp folder: $tmp_dir"
 
